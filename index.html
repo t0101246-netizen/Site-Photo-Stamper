@@ -1,0 +1,168 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>工程浮水印相機</title>
+    
+    <link rel="manifest" href="manifest.json">
+    <meta name="theme-color" content="#000000">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <meta name="apple-mobile-web-app-title" content="工程相機">
+    <link rel="apple-touch-icon" href="icon-192.png">
+
+    <style>
+        /* CSS 樣式維持不變，為節省篇幅省略，請使用上一版的 CSS */
+        :root { --cam-black: #000; --cam-ui: rgba(0,0,0,0.6); --accent: #f59e0b; }
+        body { margin: 0; padding: 0; background: #111; color: white; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; overflow: hidden; height: 100vh; display: flex; flex-direction: column; }
+        .camera-container { flex: 1; position: relative; overflow: hidden; display: flex; align-items: center; justify-content: center; background: #000; }
+        video { width: 100%; height: 100%; object-fit: cover; }
+        canvas { display: none; }
+        .overlay-preview { position: absolute; bottom: 0; left: 0; width: 100%; padding: 15px; background: linear-gradient(to top, rgba(0,0,0,0.8), transparent); pointer-events: none; text-shadow: 1px 1px 2px black; font-size: 0.9rem; z-index: 10; }
+        .preview-row { display: flex; gap: 10px; margin-bottom: 2px; }
+        .p-label { color: var(--accent); font-weight: bold; min-width: 70px; }
+        .controls { background: #222; padding: 15px; border-radius: 15px 15px 0 0; z-index: 20; position: relative; padding-bottom: 30px; /* PWA底部留白 */ }
+        .input-group { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 10px; }
+        input, select { background: #333; border: 1px solid #444; color: white; padding: 8px; border-radius: 6px; width: 100%; box-sizing: border-box; font-size: 14px; }
+        input:focus { outline: 1px solid var(--accent); }
+        .actions { display: flex; justify-content: space-between; align-items: center; padding-top: 10px; }
+        .btn-circle { width: 60px; height: 60px; border-radius: 50%; border: 4px solid white; background: transparent; cursor: pointer; position: relative; }
+        .btn-circle::after { content: ''; width: 50px; height: 50px; background: white; border-radius: 50%; position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); transition: 0.2s; }
+        .btn-circle:active::after { background: var(--accent); transform: translate(-50%, -50%) scale(0.9); }
+        .btn-icon { background: none; border: none; color: white; font-size: 1.5rem; cursor: pointer; padding: 10px; }
+        .btn-text { background: var(--accent); color: black; border: none; padding: 8px 15px; border-radius: 20px; font-weight: bold; cursor: pointer; font-size: 0.9rem; }
+        .modal { position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.95); z-index: 100; display: none; flex-direction: column; align-items: center; justify-content: center; }
+        .modal img { max-width: 95%; max-height: 80%; border: 2px solid white; box-shadow: 0 0 20px rgba(0,0,0,0.5); }
+        .modal-actions { margin-top: 20px; display: flex; gap: 20px; }
+        .toggle-options { display: flex; justify-content: space-between; font-size: 0.8rem; color: #aaa; margin-bottom: 5px; }
+    </style>
+</head>
+<body>
+
+    <div class="camera-container">
+        <video id="video" autoplay playsinline></video>
+        <div class="overlay-preview" id="screenOverlay">
+            <div class="preview-row"><span class="p-label">工程名稱</span><span id="p-proj">--</span></div>
+            <div class="preview-row"><span class="p-label">施工項目</span><span id="p-item">--</span></div>
+            <div class="preview-row"><span class="p-label">時間</span><span id="p-time">--</span></div>
+            <div class="preview-row"><span class="p-label">位置</span><span id="p-loc">定位中...</span></div>
+        </div>
+    </div>
+    <canvas id="canvas"></canvas>
+
+    <div class="controls">
+        <div class="toggle-options">
+            <span>📷 施工紀錄資訊</span>
+            <span onclick="toggleCam()" style="cursor:pointer;">🔄 切換鏡頭</span>
+        </div>
+        <div class="input-group">
+            <input type="text" id="inpProj" placeholder="工程名稱" oninput="updatePreview()">
+            <input type="text" id="inpItem" placeholder="施工項目" oninput="updatePreview()">
+        </div>
+        <div class="input-group">
+            <input type="text" id="inpUser" placeholder="檢查人員" oninput="updatePreview()">
+            <select id="inpWeather">
+                <option value="晴">☀ 晴</option>
+                <option value="陰">☁ 陰</option>
+                <option value="雨">🌧 雨</option>
+            </select>
+        </div>
+        <div class="actions">
+            <button class="btn-icon" onclick="getLocation()">📍</button>
+            <button class="btn-circle" onclick="takePhoto()"></button>
+            <button class="btn-icon" onclick="openGallery()">📂</button>
+        </div>
+    </div>
+
+    <div class="modal" id="resultModal">
+        <img id="finalImage" alt="Captured Photo">
+        <div class="modal-actions">
+            <button class="btn-text" style="background:#555; color:white;" onclick="closeModal()">✖ 放棄</button>
+            <button class="btn-text" onclick="downloadImage()">⬇ 下載儲存</button>
+        </div>
+    </div>
+
+    <script>
+        const video = document.getElementById('video');
+        const canvas = document.getElementById('canvas');
+        let stream = null;
+        let facingMode = 'environment'; 
+
+        async function initCamera() {
+            try {
+                if (stream) stream.getTracks().forEach(track => track.stop());
+                const constraints = { video: { facingMode: facingMode, width: { ideal: 1920 }, height: { ideal: 1080 } } };
+                stream = await navigator.mediaDevices.getUserMedia(constraints);
+                video.srcObject = stream;
+                updateTime();
+                getLocation();
+            } catch (err) { alert("無法存取相機，請確認權限或使用 HTTPS。"); }
+        }
+        function toggleCam() { facingMode = facingMode === 'environment' ? 'user' : 'environment'; initCamera(); }
+        function updateTime() {
+            const now = new Date();
+            const str = now.getFullYear() + '/' + (now.getMonth()+1).toString().padStart(2,'0') + '/' + now.getDate().toString().padStart(2,'0') + ' ' + now.getHours().toString().padStart(2,'0') + ':' + now.getMinutes().toString().padStart(2,'0');
+            document.getElementById('p-time').innerText = str;
+            requestAnimationFrame(updateTime);
+        }
+        function updatePreview() {
+            document.getElementById('p-proj').innerText = document.getElementById('inpProj').value || "--";
+            document.getElementById('p-item').innerText = document.getElementById('inpItem').value || "--";
+        }
+        function getLocation() {
+            if (navigator.geolocation) {
+                navigator.geolocation.getCurrentPosition((pos) => {
+                    document.getElementById('p-loc').innerText = `Lat:${pos.coords.latitude.toFixed(5)}, Lng:${pos.coords.longitude.toFixed(5)}`;
+                }, (err) => { document.getElementById('p-loc').innerText = "定位失敗"; });
+            }
+        }
+        function takePhoto() {
+            const ctx = canvas.getContext('2d');
+            canvas.width = video.videoWidth; canvas.height = video.videoHeight;
+            ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+            const barHeight = canvas.height * 0.25;
+            const yStart = canvas.height - barHeight;
+            ctx.fillStyle = "rgba(0, 0, 0, 0.6)"; ctx.fillRect(0, yStart, canvas.width, barHeight);
+            
+            const proj = document.getElementById('inpProj').value || "未命名工程";
+            const item = document.getElementById('inpItem').value || "施工紀錄";
+            const user = document.getElementById('inpUser').value || "";
+            const weather = document.getElementById('inpWeather').value;
+            const time = document.getElementById('p-time').innerText;
+            const loc = document.getElementById('p-loc').innerText;
+
+            const padding = canvas.width * 0.04;
+            const fontSizeMain = canvas.width * 0.045; 
+            const fontSizeSub = canvas.width * 0.035;  
+            
+            ctx.fillStyle = "white"; ctx.textBaseline = "top";
+            ctx.font = `bold ${fontSizeMain}px Arial`; ctx.fillStyle = "#f59e0b"; ctx.fillText("工程: " + proj, padding, yStart + padding);
+            ctx.fillStyle = "white"; ctx.font = `${fontSizeSub}px Arial`; ctx.fillText("項目: " + item, padding, yStart + padding + fontSizeMain * 1.5);
+            ctx.fillText(`人員: ${user}   天氣: ${weather}`, padding, yStart + padding + fontSizeMain * 1.5 + fontSizeSub * 1.4);
+            ctx.fillText("時間: " + time, padding, yStart + padding + fontSizeMain * 1.5 + fontSizeSub * 2.8);
+            ctx.font = `${fontSizeSub * 0.8}px Arial`; ctx.fillStyle = "#ccc"; ctx.fillText(loc, padding, yStart + padding + fontSizeMain * 1.5 + fontSizeSub * 4.2);
+
+            document.getElementById('finalImage').src = canvas.toDataURL('image/jpeg', 0.9);
+            document.getElementById('resultModal').style.display = 'flex';
+        }
+        function closeModal() { document.getElementById('resultModal').style.display = 'none'; }
+        function downloadImage() {
+            const link = document.createElement('a');
+            link.download = `SitePhoto_${Date.now()}.jpg`;
+            link.href = document.getElementById('finalImage').src;
+            link.click();
+            closeModal();
+        }
+        function openGallery() { alert("請使用下載功能將照片存入手機相簿。"); }
+        window.addEventListener('load', initCamera);
+
+        // --- PWA Service Worker 註冊 ---
+        if ('serviceWorker' in navigator) {
+            navigator.serviceWorker.register('sw.js')
+            .then(reg => console.log('SW registered!', reg))
+            .catch(err => console.log('SW failed', err));
+        }
+    </script>
+</body>
+</html>
